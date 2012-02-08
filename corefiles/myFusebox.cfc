@@ -36,6 +36,9 @@ limitations under the License.
 	// FB5: new execution parameters:
 	this.parameters.clean = false;	 	// don't delete parsed files by default
 	this.parameters.parseall = false;	// don't compile all fuseactions by default
+	// FB5.6
+	this.parameters.maxNumContextsPreserved = 10;
+	this.parameters.preserveKeyURLKey = 'fbpk';
 	  
 	this.parameters.userProvidedLoadParameter = false;
 	this.parameters.userProvidedCleanParameter = false;
@@ -345,8 +348,14 @@ limitations under the License.
 		<cfargument name="xfa" type="string" required="false" />
 		<cfargument name="addtoken" type="boolean" default="false" />
 		<cfargument name="type" type="string" default="client" />
+		<cfargument name="preserve" type="string" default="none" />
+		<cfargument name="append" type="string" default="none" />
 
 		<cfset var theUrl = "" />
+		<cfset var baseQueryString = "" />
+		<cfset var key = "" />
+		<cfset var keys = "" />
+		<cfset var targetURL = "" />
 		
 		<!--- url/xfa - exactly one is required --->
 		<cfif structKeyExists(arguments,"url")>
@@ -363,6 +372,74 @@ limitations under the License.
 			<cfthrow type="fusebox.badGrammar.requiredAttributeMissing" 
 					message="Required attribute is missing" 
 					detail="Either the attribute 'url' or 'xfa' is required, for a 'relocate' verb in fuseaction #this.thiscircuit#.#this.thisFuseaction#." />
+		</cfif>
+		
+		<!--- are we perserving values set in fuseboxEvent/attributes scope? --->
+		<cfif compareNoCase(arguments.preserve, 'none')>
+			
+			<cfset preserveKey = saveFlashContext( arguments.preserve ) />
+			
+			<!---
+			TODO: Make the keys case-sensitive
+			TODO: Add a list of protected keys that will not be appended, ie: "fuseaction", "fusebox.password", "fieldnames"
+			TODO: in the "ALL" case, don't arbitrarily force on a key that has no value, which in SES mode produces //
+			 <cfif ( compareNoCase(arguments.append, 'none') )>
+
+				<cfif NOT compareNoCase( arguments.append, 'all')>
+					<cfloop list="#StructKeyList(variables.variablesScope.attributes)#" index="key">
+						<cfif ( isSimpleValue( variables.variablesScope.attributes[ key ] ) )>
+							<cfset baseQueryString = listAppend( baseQueryString, key & getApplication().queryStringEqual
+									& urlEncodedFormat( variables.variablesScope.attributes[ key ] ), getApplication().queryStringSeparator ) />
+						</cfif>
+					</cfloop>
+				</cfif>
+
+			<cfelse>
+						
+				<cfset var keys = listToArray( append ) />
+
+				<cfloop list="#StructKeyList(variables.variablesScope.attributes)#" index="key">
+					<cfif ( structKeyExists( variables.variablesScope.attributes, key ) && isSimpleValue( variables.variablesScope.attributes[ key ] ) )>
+						<cfset baseQueryString = listAppend( baseQueryString, key & getApplication().queryStringEqual
+								& urlEncodedFormat( variables.variablesScope.attributes[ key ] ), getApplication().queryStringSeparator ) />
+					</cfif>
+				</cfloop>
+				
+			</cfif> --->
+		
+		</cfif>
+		
+		<!--- 
+		HANZO: Not sure that this is needed; queryString is a FW/1 convention to explicitly pass in a name/value pair, no equitable convention in FB?
+		
+		<cfif ( len(baseQueryString) )>
+			<cfif ( len(queryString) )>
+				<cfif ( left( queryString, 1 ) IS theFusebox.queryStringStart OR left( queryString, 1 ) IS '##' )>
+					<cfset baseQueryString = baseQueryString & queryString />
+				<cfelse>
+					<cfset baseQueryString = baseQueryString & theFusebox.queryStringSeparator & queryString />
+				</cfif>
+			</cfif>
+		<cfelse>
+			<cfset baseQueryString = queryString />
+		</cfif> --->
+		
+		<!--- <cfset targetURL = buildURL( action, path, baseQueryString ) /> --->
+		
+		<cfif ( len(preserveKey) && this.parameters.maxNumContextsPreserved GT 1 )>
+			
+			<cfif ( getApplication().queryStringStart IS '?' AND find( '?', theUrl ) )>
+				<cfset preserveKey = '#getApplication().queryStringSeparator##this.parameters.preserveKeyURLKey##getApplication().queryStringEqual##preserveKey#' />
+			<cfelse>
+				<cfset preserveKey = '#getApplication().queryStringStart##this.parameters.preserveKeyURLKey##getApplication().queryStringEqual##preserveKey#' />
+			</cfif>
+			
+			<cfif ( find( '##', theUrl ) )>
+				<cfset theUrl = listFirst( theUrl, '##' ) & preserveKey & '##' & listRest( theUrl, '##' ) />
+			<cfelse>
+				<cfset theUrl = theUrl & preserveKey />
+			</cfif>
+			
 		</cfif>
 		
 		<!--- type - server|client|moved - we do not support javascript here --->
@@ -485,4 +562,145 @@ limitations under the License.
 		<cfreturn result />
 		
 	</cffunction>
+	
+	<cffunction name="reloadEventState" returntype="void" access="public" output="false">
+	
+		<cfset restoreFlashContext() />
+	</cffunction>
+	
+	<!--- 
+	maintaining context across redirects
+	ported from Sean Corfield's FW/1 Framework
+	https://github.com/seancorfield/fw1
+	 --->
+	
+	<cffunction name="restoreFlashContext" returntype="void" access="private" output="false">
+
+		<cfset var preserveKey = '' />
+
+		<cfif this.parameters.maxNumContextsPreserved GT 1>
+
+			<cfif NOT structKeyExists( variables.variablesScope.attributes, this.parameters.preserveKeyURLKey )>
+				<cfreturn />
+			</cfif>
+			
+			<cfset preserveKey =  variables.variablesScope.attributes[ this.parameters.preserveKeyURLKey ] />		
+			<cfset preserveKeySessionKey = getPreserveKeySessionKey( preserveKey ) />
+
+		<cfelse>
+		
+			<cfset preserveKeySessionKey = getPreserveKeySessionKey( '' ) />
+
+		</cfif>
+
+		<cftry>
+			<cfif ( structKeyExists( session, preserveKeySessionKey ) )>
+				
+				<cfset structAppend( variables.variablesScope.attributes, session[ preserveKeySessionKey ], false ) />
+				
+				<cfif ( this.parameters.maxNumContextsPreserved EQ 1 ) >
+					<!---
+						When multiple contexts are preserved, the oldest context is purged
+					 	within getNextPreserveKeyAndPurgeOld once the maximum is reached.
+					 	This allows for a browser refresh after the redirect to still receive
+					 	the same context.
+					--->
+					<cfset structDelete( session, preserveKeySessionKey ) />
+				</cfif>
+			</cfif>
+		
+			<cfcatch type="any">
+				<!--- session scope not enabled, do nothing --->
+			</cfcatch>
+		
+		</cftry>
+	</cffunction>
+	
+	<cffunction name="saveFlashContext" returntype="string" access="private" output="false">
+		<cfargument name="keys" type="string" required="true" />
+
+		<cfset var key 						= 0 />
+		<cfset var keyNames					= 0 />
+		<cfset var curPreserveKey 			= getNextPreserveKeyAndPurgeOld() />
+		<cfset var preserveKeySessionKey 	= getPreserveKeySessionKey( curPreserveKey ) />
+		<cftry>
+		
+			<!--- TODO: is this thread-safe? seems to me this ought to be locked --->
+			<cfparam name="session.#preserveKeySessionKey#" default="#{ }#" />
+		
+			<cfif ( arguments.keys EQ 'all' )>
+			
+				<!--- FIXME: Hack for now, in actuality, if you want to treat event as a true object, call getAllValues(), and loop over the bunch of 'em. We'll cheat for the time being and access the attributes under the event object's hood --->
+				<cfset structAppend( session[ preserveKeySessionKey ], variables.variablesScope.attributes ) />
+
+			<cfelse>
+
+				<cfset key = 0 />
+				<cfset keyNames = listToArray( keys ) />
+
+				<cfloop array="#keyNames#" index="key">
+					<cfif ( variables.variablesScope.event.valueExists( key ) )>
+						<cfset session[ preserveKeySessionKey ][ key ] = variables.variablesScope.event.getValue( key ) />
+					</cfif>
+				</cfloop>
+
+			</cfif>
+		
+			<cfcatch type="any">
+				<!--- session scope not enabled, do nothing --->
+			</cfcatch>
+
+		</cftry>
+
+		<cfreturn curPreserveKey />
+	</cffunction>
+	
+	<cffunction name="getNextPreserveKeyAndPurgeOld" returntype="string" access="private" output="false">
+
+		<cfset var nextPreserveKey = '' />
+		<cfset var oldKeyToPurge = '' />
+		<cfset var key = '' />
+		
+		<cfif ( this.parameters.maxNumContextsPreserved GT 1 )>
+		
+			<cflock scope="session" type="exclusive" timeout="30">
+				
+				<cfparam name="session.__fbNextPreserveKey" default="1" />
+
+				<cfset nextPreserveKey = session.__fbNextPreserveKey />
+				<cfset session.__fbNextPreserveKey = session.__fbNextPreserveKey + 1 />
+			
+			</cflock>
+			
+			<cfset oldKeyToPurge = nextPreserveKey - this.parameters.maxNumContextsPreserved />
+			
+		<cfelse>
+		
+			<cflock scope="session" type="exclusive" timeout="30">
+				
+				<cfset session.__fbPreserveKey = '' />
+				<cfset nextPreserveKey = session.__fbPreserveKey />
+			
+			</cflock>
+			
+			<cfset oldKeyToPurge = '' />
+		
+		</cfif>
+
+		<cfset key = getPreserveKeySessionKey( oldKeyToPurge ) />
+
+		<!--- TODO: this may also need to be locked --->		
+		<cfif ( structKeyExists( session, key ) )>
+			<cfset structDelete( session, key ) />
+		</cfif>
+
+		<cfreturn nextPreserveKey />
+	</cffunction>
+	
+	<cffunction name="getPreserveKeySessionKey" returntype="string" access="private" output="false">
+		<cfargument name="preserveKey" type="string" required="true" />
+	
+		<cfreturn "__fb" & arguments.preserveKey />
+	</cffunction>
+	
 </cfcomponent>
